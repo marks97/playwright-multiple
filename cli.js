@@ -113,8 +113,6 @@ async function getSharedBrowserContext(config) {
       `--remote-debugging-port=${cdpPort}`,
       '--no-first-run',
       '--no-default-browser-check',
-      '--disable-blink-features=AutomationControlled',
-      '--disable-infobars',
     ];
     if (userDataDir) chromeArgs.push(`--user-data-dir=${path.resolve(userDataDir)}`);
     if (headless) chromeArgs.push('--headless=new');
