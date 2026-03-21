@@ -163,8 +163,8 @@ Object.defineProperty(mcpServer, 'start', {
     if (!schema.inputSchema || !schema.inputSchema.shape) return schema;
 
     const newShape = { ...schema.inputSchema.shape };
-    newShape.tabId = zod.string().optional().describe(
-      'Tab identifier for isolation. Each unique tabId gets its own browser tab. Omit for default tab.'
+    newShape.tabId = zod.string().describe(
+      'REQUIRED. Unique tab identifier for browser tab isolation. Generate by combining your task or target site with a short random suffix (e.g. "eldiario-a3f", "search-google-9kx"). Reuse the SAME tabId across all your calls to stay on your tab. Different agents MUST use different tabIds to avoid conflicts.'
     );
 
     return { ...schema, inputSchema: zod.object(newShape) };
@@ -207,19 +207,12 @@ Object.defineProperty(mcpServer, 'start', {
 
     // Wrap callTool for tab routing (both modes)
     const originalCallTool = backend.callTool.bind(backend);
-    let firstCallDone = false;
     backend.callTool = async (name, rawArgs, progress) => {
       const { tabId, ...args } = rawArgs || {};
 
       return router.run(async () => {
         const ctx = backend._context;
         if (ctx && tabId) {
-          if (!firstCallDone) {
-            firstCallDone = true;
-            if (ctx.tabs().length > 0 && !router._tabIdToIndex.has(tabId)) {
-              router._tabIdToIndex.set(tabId, 0);
-            }
-          }
           await router.ensureTab(ctx, tabId);
         }
         return originalCallTool(name, args, progress);
