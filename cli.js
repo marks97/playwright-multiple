@@ -19,7 +19,7 @@ const { BrowserBackend } = require(path.join(pwCorePath, 'lib/tools/backend/brow
 const { filteredTools } = require(path.join(pwCorePath, 'lib/tools/backend/tools.js'));
 
 // Parse --shared and --cdp-port early (before decorateMCPCommand consumes args)
-const isShared = process.argv.includes('--shared');
+const isShared = !process.argv.includes('--no-shared');
 let cdpPort = 9222;
 const cdpPortIdx = process.argv.indexOf('--cdp-port');
 if (cdpPortIdx !== -1 && process.argv[cdpPortIdx + 1]) {
