@@ -12,7 +12,8 @@
   "author": "marks97",
   "license": "Apache-2.0",
   "scripts": {
-    "build": "echo OK"
+    "build": "echo OK",
+    "postinstall": "node postinstall.js"
   },
   "dependencies": {
     "playwright": "1.59.0-alpha-1773608981000",

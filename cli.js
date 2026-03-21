@@ -63,7 +63,8 @@ class TabIdRouter {
 const originalStart = mcpServer.start;
 const router = new TabIdRouter();
 
-mcpServer.start = async function patchedStart(factory, options) {
+Object.defineProperty(mcpServer, 'start', {
+  value: async function patchedStart(factory, options) {
   // 1. Add tabId to every tool schema
   factory.toolSchemas = factory.toolSchemas.map(schema => {
     if (!schema.inputSchema || !schema.inputSchema.shape) return schema;
@@ -83,7 +84,9 @@ mcpServer.start = async function patchedStart(factory, options) {
 
     const originalCallTool = backend.callTool.bind(backend);
     let firstCallDone = false;
+    process.stderr.write(`[tab-router] callTool wrapper installed on backend\n`);
     backend.callTool = async (name, rawArgs, progress) => {
+      process.stderr.write(`[tab-router] callTool called: ${name} tabId=${rawArgs?.tabId} args=${JSON.stringify(rawArgs).substring(0, 100)}\n`);
       const { tabId, ...args } = rawArgs || {};
 
       return router.run(async () => {
@@ -112,7 +115,10 @@ mcpServer.start = async function patchedStart(factory, options) {
   factory.nameInConfig = 'playwright-multiple';
 
   return originalStart.call(this, factory, options);
-};
+  },
+  writable: true,
+  configurable: true,
+});
 
 // --- Run the original CLI (calls our patched start) ---
 const { program } = require('playwright-core/lib/utilsBundle');
