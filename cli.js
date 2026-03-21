@@ -18,13 +18,17 @@ const { z: zod } = require(path.join(pwCorePath, 'lib/mcpBundle.js'));
 const { BrowserBackend } = require(path.join(pwCorePath, 'lib/tools/backend/browserBackend.js'));
 const { filteredTools } = require(path.join(pwCorePath, 'lib/tools/backend/tools.js'));
 
-// Parse --shared and --cdp-port early (before decorateMCPCommand consumes args)
+// Parse and remove custom flags early (before decorateMCPCommand/Commander consumes args)
 const isShared = !process.argv.includes('--no-shared');
 let cdpPort = 9222;
 const cdpPortIdx = process.argv.indexOf('--cdp-port');
 if (cdpPortIdx !== -1 && process.argv[cdpPortIdx + 1]) {
   cdpPort = parseInt(process.argv[cdpPortIdx + 1], 10);
+  process.argv.splice(cdpPortIdx, 2); // remove --cdp-port and its value
 }
+// Remove --no-shared too
+const noSharedIdx = process.argv.indexOf('--no-shared');
+if (noSharedIdx !== -1) process.argv.splice(noSharedIdx, 1);
 
 // --- Tab ID Router ---
 class TabIdRouter {
