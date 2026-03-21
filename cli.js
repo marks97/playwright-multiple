@@ -39,15 +39,20 @@ class TabIdRouter {
     if (!tabId) return;
 
     if (!this._tabIdToIndex.has(tabId)) {
-      await context.newTab();
-      this._tabIdToIndex.set(tabId, context.tabs().length - 1);
+      process.stderr.write(`[tab-router] creating tab "${tabId}", tabs before: ${context.tabs().length}\n`);
+      const tab = await context.newTab();
+      const index = context.tabs().length - 1;
+      this._tabIdToIndex.set(tabId, index);
+      process.stderr.write(`[tab-router] created tab "${tabId}" at ${index}, tabs after: ${context.tabs().length}, tab=${!!tab}\n`);
       return;
     }
 
     const storedIndex = this._tabIdToIndex.get(tabId);
+    process.stderr.write(`[tab-router] switching to tab "${tabId}" at index ${storedIndex}, total: ${context.tabs().length}\n`);
     if (storedIndex < context.tabs().length) {
       await context.selectTab(storedIndex);
     } else {
+      process.stderr.write(`[tab-router] index ${storedIndex} out of range, recreating\n`);
       await context.newTab();
       this._tabIdToIndex.set(tabId, context.tabs().length - 1);
     }
