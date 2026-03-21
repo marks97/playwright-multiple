@@ -81,8 +81,13 @@ mcpServer.start = async function patchedStart(factory, options) {
       const { tabId, ...args } = rawArgs || {};
 
       return router.run(async () => {
-        if (backend._context && tabId) {
-          await router.ensureTab(backend._context, tabId);
+        const ctx = backend._context;
+        if (ctx && tabId) {
+          process.stderr.write(`[tab-router] tool=${name} tabId=${tabId} tabs=${ctx.tabs().length} mapped=${router._tabIdToIndex.has(tabId)}\n`);
+          await router.ensureTab(ctx, tabId);
+          process.stderr.write(`[tab-router] after ensureTab: tabs=${ctx.tabs().length} currentTab=${ctx.tabs().indexOf(ctx.currentTab())}\n`);
+        } else {
+          process.stderr.write(`[tab-router] tool=${name} tabId=${tabId} context=${!!ctx}\n`);
         }
         return originalCallTool(name, args, progress);
       });
