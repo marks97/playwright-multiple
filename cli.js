@@ -69,6 +69,67 @@ class TabIdRouter {
 }
 
 // --- Shared Chrome via CDP ---
+
+// Resolve a Chrome executable for the current platform.
+// Honors $PLAYWRIGHT_MCP_CHROME_PATH first, then platform defaults, then PATH.
+function resolveChromePath() {
+  const fs = require('fs');
+  const { execSync } = require('child_process');
+
+  if (process.env.PLAYWRIGHT_MCP_CHROME_PATH && fs.existsSync(process.env.PLAYWRIGHT_MCP_CHROME_PATH))
+    return process.env.PLAYWRIGHT_MCP_CHROME_PATH;
+
+  const candidates = process.platform === 'darwin' ? [
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+  ] : process.platform === 'win32' ? [
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+  ] : [
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/snap/bin/chromium',
+  ];
+  for (const p of candidates) {
+    try { if (fs.existsSync(p)) return p; } catch {}
+  }
+  // Fall back to whatever's on PATH.
+  try {
+    const which = process.platform === 'win32' ? 'where' : 'which';
+    for (const name of ['google-chrome', 'chromium', 'chromium-browser', 'chrome']) {
+      try {
+        const out = execSync(`${which} ${name}`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim().split('\n')[0];
+        if (out) return out;
+      } catch {}
+    }
+  } catch {}
+  throw new Error('Chrome executable not found. Set PLAYWRIGHT_MCP_CHROME_PATH or install Google Chrome / Chromium.');
+}
+
+async function waitForCdpReady(cdpEndpoint, { timeoutMs = 15000, intervalMs = 250 } = {}) {
+  const http = require('http');
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await new Promise((resolve, reject) => {
+        const req = http.get(`${cdpEndpoint}/json/version`, (res) => {
+          res.resume();
+          if (res.statusCode && res.statusCode < 400) resolve(); else reject(new Error(`status ${res.statusCode}`));
+        });
+        req.on('error', reject);
+        req.setTimeout(intervalMs * 2, () => { req.destroy(new Error('timeout')); });
+      });
+      return;
+    } catch {
+      await new Promise(r => setTimeout(r, intervalMs));
+    }
+  }
+  throw new Error(`CDP endpoint ${cdpEndpoint} did not become ready within ${timeoutMs}ms`);
+}
+
 async function getSharedBrowserContext(config) {
   const { chromium } = require('playwright-core');
   const cdpEndpoint = `http://localhost:${cdpPort}`;
@@ -79,40 +140,12 @@ async function getSharedBrowserContext(config) {
     browser = await chromium.connectOverCDP(cdpEndpoint);
     process.stderr.write(`[shared] connected to existing Chrome on port ${cdpPort}\n`);
   } catch {
-    // No Chrome running — launch one with CDP
+    // No Chrome listening on this CDP port — spawn one ourselves.
     const userDataDir = config.browser?.userDataDir || '';
     const headless = config.browser?.launchOptions?.headless ?? false;
+    const { spawn } = require('child_process');
 
-    const args = [
-      `--remote-debugging-port=${cdpPort}`,
-      '--no-first-run',
-      '--no-default-browser-check',
-    ];
-
-    process.stderr.write(`[shared] launching Chrome with CDP on port ${cdpPort}\n`);
-    const launchedBrowser = await chromium.launch({
-      channel: 'chrome',
-      headless,
-      args,
-      ...config.browser?.launchOptions,
-      // Override args to include our CDP port
-      ignoreDefaultArgs: ['--enable-automation'],
-    });
-
-    // Now connect via CDP to get a persistent connection
-    // The launched browser exposes a CDP endpoint
-    const wsEndpoint = launchedBrowser.contexts()[0]?.pages()[0]?.context()?.browser()?.wsEndpoint?.();
-
-    // Actually, simpler: just use the launched browser directly
-    // But for shared mode, we need CDP so other processes can connect.
-    // Launch Chrome manually with user-data-dir and CDP.
-    await launchedBrowser.close();
-
-    // Launch Chrome the raw way with user-data-dir + CDP
-    const { execSync, spawn } = require('child_process');
-
-    // Find Chrome
-    const chromePath = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+    const chromePath = resolveChromePath();
     const chromeArgs = [
       `--remote-debugging-port=${cdpPort}`,
       '--no-first-run',
@@ -121,27 +154,14 @@ async function getSharedBrowserContext(config) {
     if (userDataDir) chromeArgs.push(`--user-data-dir=${path.resolve(userDataDir)}`);
     if (headless) chromeArgs.push('--headless=new');
 
+    process.stderr.write(`[shared] launching ${chromePath} with CDP on port ${cdpPort}\n`);
     const chromeProc = spawn(chromePath, chromeArgs, {
       detached: true,
       stdio: 'ignore',
     });
     chromeProc.unref();
 
-    // Wait for CDP to be ready
-    for (let i = 0; i < 30; i++) {
-      try {
-        const http = require('http');
-        await new Promise((resolve, reject) => {
-          http.get(`${cdpEndpoint}/json/version`, (res) => {
-            res.resume();
-            resolve();
-          }).on('error', reject);
-        });
-        break;
-      } catch {
-        await new Promise(r => setTimeout(r, 500));
-      }
-    }
+    await waitForCdpReady(cdpEndpoint);
 
     browser = await chromium.connectOverCDP(cdpEndpoint);
     process.stderr.write(`[shared] launched Chrome and connected via CDP on port ${cdpPort}\n`);
@@ -150,6 +170,35 @@ async function getSharedBrowserContext(config) {
   // Get or create a context
   const contexts = browser.contexts();
   return contexts.length > 0 ? contexts[0] : await browser.newContext();
+}
+
+function buildSharedConfig() {
+  return {
+    browser: {
+      userDataDir: process.argv.includes('--user-data-dir')
+        ? process.argv[process.argv.indexOf('--user-data-dir') + 1]
+        : '',
+      launchOptions: {
+        headless: process.argv.includes('--headless'),
+      },
+    },
+  };
+}
+
+function isContextDeadError(err) {
+  const msg = String(err && (err.message || err));
+  return /Target page, context or browser has been closed|Target closed|Browser has been closed|browser has disconnected|Connection closed|Browser closed|WebSocket is not open/i.test(msg);
+}
+
+function isBrowserContextAlive(browserContext) {
+  if (!browserContext) return false;
+  try {
+    const browser = browserContext.browser?.();
+    if (!browser) return false;
+    return browser.isConnected?.() !== false;
+  } catch {
+    return false;
+  }
 }
 
 // --- Monkey-patch mcpServer.start ---
@@ -175,47 +224,67 @@ Object.defineProperty(mcpServer, 'start', {
   factory.create = async function(clientInfo) {
     let backend;
 
-    if (isShared) {
-      // Shared mode: connect to Chrome via CDP instead of launching a new browser
-      const { resolveCLIConfig } = require(path.join(pwCorePath, 'lib/tools/mcp/config.js'));
-      // We need the config to know headless, userDataDir etc.
-      // But config is already resolved inside decorateMCPCommand's action.
-      // We can access it via the tools that were already filtered.
-      // Actually, we just need the browserContext.
-      const browserContext = await getSharedBrowserContext({
-        browser: {
-          userDataDir: process.argv.includes('--user-data-dir')
-            ? process.argv[process.argv.indexOf('--user-data-dir') + 1]
-            : '',
-          launchOptions: {
-            headless: process.argv.includes('--headless'),
-          },
-        },
-      });
+    // Helper that (re)builds the shared backend's underlying browser context
+    // and re-initializes it. Used both on first create and on dead-browser
+    // recovery. We mutate `backend` in place so the gateway's reference stays
+    // valid.
+    const reinitSharedBackend = async () => {
+      const browserContext = await getSharedBrowserContext(buildSharedConfig());
+      const caps = ['core', 'core-navigation', 'core-tabs', 'core-input'];
+      const tools = filteredTools({ capabilities: caps });
+      if (backend) {
+        // Drop the stale Context wrapper if any.
+        await backend._context?.dispose().catch(() => {});
+        backend._context = undefined;
+        backend.browserContext = browserContext;
+        backend._tools = tools;
+        backend._config = { capabilities: caps };
+        await backend.initialize(clientInfo);
+      } else {
+        backend = new BrowserBackend({ capabilities: caps }, browserContext, tools);
+        await backend.initialize(clientInfo);
+      }
+      // Tab indices belong to the dead context — clear them.
+      router._tabIdToIndex.clear();
+    };
 
-      const tools = filteredTools({ capabilities: ['core', 'core-navigation', 'core-tabs', 'core-input'] });
-      backend = new BrowserBackend(
-        { capabilities: ['core', 'core-navigation', 'core-tabs', 'core-input'] },
-        browserContext,
-        tools
-      );
-      await backend.initialize(clientInfo);
+    if (isShared) {
+      await reinitSharedBackend();
     } else {
       // Normal mode: use the original factory
       backend = await originalCreate.call(this, clientInfo);
     }
 
-    // Wrap callTool for tab routing (both modes)
+    // Wrap callTool for tab routing + (in shared mode) auto-recovery from a
+    // dead browser. If the user kills Chrome between calls, transparently
+    // relaunch it and replay the call once.
     const originalCallTool = backend.callTool.bind(backend);
     backend.callTool = async (name, rawArgs, progress) => {
       const { tabId, ...args } = rawArgs || {};
 
       return router.run(async () => {
-        const ctx = backend._context;
-        if (ctx && tabId) {
-          await router.ensureTab(ctx, tabId);
+        const performCall = async () => {
+          if (backend._context && tabId) {
+            await router.ensureTab(backend._context, tabId);
+          }
+          return originalCallTool.call(backend, name, args, progress);
+        };
+
+        // Pre-check liveness in shared mode — cheaper than reacting to errors
+        // and avoids partial side effects.
+        if (isShared && !isBrowserContextAlive(backend.browserContext)) {
+          process.stderr.write('[shared] cached browser context is dead; re-launching Chrome\n');
+          await reinitSharedBackend();
         }
-        return originalCallTool(name, args, progress);
+
+        try {
+          return await performCall();
+        } catch (err) {
+          if (!isShared || !isContextDeadError(err)) throw err;
+          process.stderr.write('[shared] tool call hit a closed browser; re-launching and retrying once\n');
+          await reinitSharedBackend();
+          return await performCall();
+        }
       });
     };
 
