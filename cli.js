@@ -30,11 +30,72 @@ if (cdpPortIdx !== -1 && process.argv[cdpPortIdx + 1]) {
 const noSharedIdx = process.argv.indexOf('--no-shared');
 if (noSharedIdx !== -1) process.argv.splice(noSharedIdx, 1);
 
+// --idle-tab-timeout-min N : auto-close any tab whose tabId hasn't been used
+// as the target of a tool call for N minutes. 0 = disabled (default).
+// Useful when multiple agents share a Chrome — without this, stale tabs
+// accumulate forever because nothing reliably closes them.
+let idleTabTimeoutMs = 0;
+const idleIdx = process.argv.indexOf('--idle-tab-timeout-min');
+if (idleIdx !== -1 && process.argv[idleIdx + 1]) {
+  const mins = parseFloat(process.argv[idleIdx + 1]);
+  if (!isNaN(mins) && mins > 0) idleTabTimeoutMs = Math.round(mins * 60 * 1000);
+  process.argv.splice(idleIdx, 2);
+}
+
 // --- Tab ID Router ---
 class TabIdRouter {
   constructor() {
     this._tabIdToIndex = new Map();
+    this._tabIdToLastActivity = new Map();
     this._mutex = Promise.resolve();
+    this._sweeperStarted = false;
+    this._lastContext = null;
+  }
+
+  markActivity(tabId) {
+    if (!tabId) return;
+    this._tabIdToLastActivity.set(tabId, Date.now());
+  }
+
+  /// Idle sweeper: every 30s, walk known tabIds and close ones that have been
+  /// inactive longer than the configured threshold. No-op if threshold is 0.
+  startIdleSweeper(thresholdMs) {
+    if (this._sweeperStarted || !thresholdMs) return;
+    this._sweeperStarted = true;
+    setInterval(async () => {
+      const context = this._lastContext;
+      if (!context) return;
+      const now = Date.now();
+      for (const [tabId, lastActivity] of [...this._tabIdToLastActivity.entries()]) {
+        if (now - lastActivity < thresholdMs) continue;
+        const idx = this._tabIdToIndex.get(tabId);
+        if (idx === undefined) {
+          this._tabIdToLastActivity.delete(tabId);
+          continue;
+        }
+        const tabs = (typeof context.tabs === 'function') ? context.tabs() : [];
+        if (idx >= tabs.length) {
+          this._tabIdToIndex.delete(tabId);
+          this._tabIdToLastActivity.delete(tabId);
+          continue;
+        }
+        try {
+          const tab = tabs[idx];
+          const page = tab?.page || tab; // tab object varies; playwright page has close()
+          if (page && typeof page.close === 'function') {
+            await page.close();
+            process.stderr.write(`[idle-sweeper] closed tab "${tabId}" (idle ${Math.round((now - lastActivity) / 1000)}s)\n`);
+          }
+        } catch (err) {
+          process.stderr.write(`[idle-sweeper] failed to close "${tabId}": ${err?.message || err}\n`);
+        } finally {
+          // Drop the registrations regardless — indexes shift after a close
+          // anyway, and ensureTab() recreates on next reference.
+          this._tabIdToIndex.delete(tabId);
+          this._tabIdToLastActivity.delete(tabId);
+        }
+      }
+    }, Math.min(30_000, thresholdMs)).unref?.();
   }
 
   async run(fn) {
@@ -51,6 +112,7 @@ class TabIdRouter {
 
   async ensureTab(context, tabId) {
     if (!tabId) return;
+    this._lastContext = context;
 
     if (!this._tabIdToIndex.has(tabId)) {
       const tab = await context.newTab();
@@ -204,6 +266,7 @@ function isBrowserContextAlive(browserContext) {
 // --- Monkey-patch mcpServer.start ---
 const originalStart = mcpServer.start;
 const router = new TabIdRouter();
+router.startIdleSweeper(idleTabTimeoutMs);
 
 Object.defineProperty(mcpServer, 'start', {
   value: async function patchedStart(factory, options) {
@@ -261,6 +324,10 @@ Object.defineProperty(mcpServer, 'start', {
     const originalCallTool = backend.callTool.bind(backend);
     backend.callTool = async (name, rawArgs, progress) => {
       const { tabId, ...args } = rawArgs || {};
+
+      // Record activity for the idle sweeper. Done outside router.run so
+      // even concurrent tool calls update the timestamp.
+      router.markActivity(tabId);
 
       return router.run(async () => {
         const performCall = async () => {
