@@ -45,7 +45,11 @@ if (idleIdx !== -1 && process.argv[idleIdx + 1]) {
 // --- Tab ID Router ---
 class TabIdRouter {
   constructor() {
-    this._tabIdToIndex = new Map();
+    // tabId -> tab object, never an index. Positions shift whenever any tab
+    // closes, so an index map silently re-points every id past the closed one
+    // at its neighbour's tab — one agent's next call then lands on another
+    // agent's page, the exact interference this router exists to prevent.
+    this._tabIdToTab = new Map();
     this._tabIdToLastActivity = new Map();
     this._mutex = Promise.resolve();
     this._sweeperStarted = false;
@@ -68,30 +72,25 @@ class TabIdRouter {
       const now = Date.now();
       for (const [tabId, lastActivity] of [...this._tabIdToLastActivity.entries()]) {
         if (now - lastActivity < thresholdMs) continue;
-        const idx = this._tabIdToIndex.get(tabId);
-        if (idx === undefined) {
-          this._tabIdToLastActivity.delete(tabId);
-          continue;
-        }
-        const tabs = (typeof context.tabs === 'function') ? context.tabs() : [];
-        if (idx >= tabs.length) {
-          this._tabIdToIndex.delete(tabId);
+        const tab = this._tabIdToTab.get(tabId);
+        if (!tab) {
           this._tabIdToLastActivity.delete(tabId);
           continue;
         }
         try {
-          const tab = tabs[idx];
           const page = tab?.page || tab; // tab object varies; playwright page has close()
-          if (page && typeof page.close === 'function') {
+          if (page && typeof page.close === 'function' && !page.isClosed?.()) {
             await page.close();
             process.stderr.write(`[idle-sweeper] closed tab "${tabId}" (idle ${Math.round((now - lastActivity) / 1000)}s)\n`);
           }
         } catch (err) {
           process.stderr.write(`[idle-sweeper] failed to close "${tabId}": ${err?.message || err}\n`);
         } finally {
-          // Drop the registrations regardless — indexes shift after a close
-          // anyway, and ensureTab() recreates on next reference.
-          this._tabIdToIndex.delete(tabId);
+          // Only this id's registration goes; the others still hold valid tab
+          // objects. Under the old index map they could not — a sweep shifted
+          // every surviving id above the closed one, and dropping just the
+          // swept entry left the rest quietly pointing at the wrong tabs.
+          this._tabIdToTab.delete(tabId);
           this._tabIdToLastActivity.delete(tabId);
         }
       }
@@ -110,23 +109,37 @@ class TabIdRouter {
     }
   }
 
-  async ensureTab(context, tabId) {
+  // `create` is false for close operations: creating a tab in order to close
+  // one is how an unknown or already-swept id ends up spawning a fresh tab and
+  // then closing something else.
+  async ensureTab(context, tabId, { create = true } = {}) {
     if (!tabId) return;
     this._lastContext = context;
 
-    if (!this._tabIdToIndex.has(tabId)) {
-      const tab = await context.newTab();
-      this._tabIdToIndex.set(tabId, context.tabs().length - 1);
-      return;
+    const known = this._tabIdToTab.get(tabId);
+    if (known) {
+      const index = context.tabs().indexOf(known);
+      if (index !== -1 && !known.page?.isClosed?.()) {
+        await context.selectTab(index);
+        return;
+      }
+      // Gone — swept, or closed by the page itself. Drop it rather than
+      // letting a stale entry resolve to whatever now sits in its place.
+      this._tabIdToTab.delete(tabId);
+      this._tabIdToLastActivity.delete(tabId);
     }
 
-    const storedIndex = this._tabIdToIndex.get(tabId);
-    if (storedIndex < context.tabs().length) {
-      await context.selectTab(storedIndex);
-    } else {
-      await context.newTab();
-      this._tabIdToIndex.set(tabId, context.tabs().length - 1);
-    }
+    if (!create) return;
+
+    await context.newTab();
+    const tab = context.currentTab?.() ?? context.tabs()[context.tabs().length - 1];
+    if (tab) this._tabIdToTab.set(tabId, tab);
+  }
+
+  forget(tabId) {
+    if (!tabId) return;
+    this._tabIdToTab.delete(tabId);
+    this._tabIdToLastActivity.delete(tabId);
   }
 }
 
@@ -308,7 +321,8 @@ Object.defineProperty(mcpServer, 'start', {
         await backend.initialize(clientInfo);
       }
       // Tab indices belong to the dead context — clear them.
-      router._tabIdToIndex.clear();
+      router._tabIdToTab.clear();
+      router._tabIdToLastActivity.clear();
     };
 
     if (isShared) {
@@ -330,11 +344,17 @@ Object.defineProperty(mcpServer, 'start', {
       router.markActivity(tabId);
 
       return router.run(async () => {
+        // A close must not resurrect the tab it is closing, and once it has
+        // run the id must stop resolving — otherwise the next call with that
+        // id selects whatever tab has since taken its place.
+        const isClose = /close/i.test(name);
         const performCall = async () => {
           if (backend._context && tabId) {
-            await router.ensureTab(backend._context, tabId);
+            await router.ensureTab(backend._context, tabId, { create: !isClose });
           }
-          return originalCallTool.call(backend, name, args, progress);
+          const result = await originalCallTool.call(backend, name, args, progress);
+          if (isClose) router.forget(tabId);
+          return result;
         };
 
         // Pre-check liveness in shared mode — cheaper than reacting to errors
