@@ -344,15 +344,34 @@ Object.defineProperty(mcpServer, 'start', {
       router.markActivity(tabId);
 
       return router.run(async () => {
-        // A close must not resurrect the tab it is closing, and once it has
-        // run the id must stop resolving — otherwise the next call with that
-        // id selects whatever tab has since taken its place.
-        const isClose = /close/i.test(name);
+        // Two tools can close a tab, and they address tabs differently:
+        //   browser_close  closes the current page
+        //   browser_tabs   takes a raw `index`, which the model guesses
+        //
+        // That raw index is the hole in tab isolation: it names a position in
+        // a list the model cannot see reliably, so a close aimed at its own
+        // tab lands on whichever tab currently occupies that slot — typically
+        // another agent's. Below, an explicit index is dropped and the call is
+        // re-aimed at the tab the caller's own tabId owns. Selecting by index
+        // is rewritten the same way, for the same reason.
+        const isTabsTool = name === 'browser_tabs';
+        const tabsAction = isTabsTool ? args?.action : undefined;
+        const isClose = name === 'browser_close'
+          || (isTabsTool && tabsAction === 'close');
+        const needsOwnTab = isClose || (isTabsTool && tabsAction === 'select');
+
         const performCall = async () => {
+          let callArgs = args;
           if (backend._context && tabId) {
             await router.ensureTab(backend._context, tabId, { create: !isClose });
+            if (needsOwnTab && callArgs && callArgs.index !== undefined) {
+              // ensureTab already selected the caller's tab; letting the
+              // model's index through would override that choice.
+              const { index, ...rest } = callArgs;
+              callArgs = rest;
+            }
           }
-          const result = await originalCallTool.call(backend, name, args, progress);
+          const result = await originalCallTool.call(backend, name, callArgs, progress);
           if (isClose) router.forget(tabId);
           return result;
         };
