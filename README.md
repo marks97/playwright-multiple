@@ -15,7 +15,7 @@ A Model Context Protocol (MCP) server that provides browser automation capabilit
 ### Modes
 
 - **Legacy CDP mode** — pass `--cdp-endpoint`. Behaviour is exactly as before: no session is created and humanised input defaults **off**. If both `--cdp-endpoint` and `--service-url` are given, `--cdp-endpoint` wins.
-- **Service mode** — pass `--service-url` (and `--service-key`) and omit `--cdp-endpoint`. On startup the server looks up or creates a browser-infra session and attaches to its `connectUrl`; humanised input defaults **on**.
+- **Service mode** — pass `--service-url` (and `--service-key`) and omit `--cdp-endpoint`. On startup the server looks up or creates a browser-infra session and attaches to its `connectUrl`; humanised input defaults **on**. Session creation is **asynchronous**: the service returns `202` with `status: "pending"` immediately, and this client **polls `GET /v1/sessions/:id`** every ~1s (up to 120s) until `status` is `running` before connecting over CDP. It fails clearly if the session ends up `failed` or the poll times out.
 
 ### Flags added by this fork
 
@@ -23,7 +23,8 @@ A Model Context Protocol (MCP) server that provides browser automation capabilit
 |------|-------------|
 | `--service-url <url>` | browser-infra base URL. Enables service mode when `--cdp-endpoint` is absent. |
 | `--service-key <key>` | browser-infra project API key (sent as `Authorization: Bearer`; never logged). |
-| `--session-key <key>` | Sharing key. Processes with the same key share one session. Defaults to `--context-id`, else `default`. |
+| `--session-key <key>` | Local registry key. Processes with the same key share one session. Defaults to `--context-id`, else `default`. |
+| `--share-key <key>` | Server-side sharing key sent to browser-infra. If a `pending`/`running` session already exists for this key, the service returns it instead of spawning a second browser. Defaults to `--session-key`, so existing configs get sharing for free. |
 | `--context-id <id>` | Attach a saved browser-infra context (Chrome profile). |
 | `--owner-id <id>` | Owner id, passed through for sticky egress. |
 | `--persist` | Persist the profile back to the context on session end. |
@@ -37,6 +38,8 @@ Existing flags (`--cdp-endpoint`, `--cdp-timeout`, `--caps`, `--console-level`, 
 ### Session sharing and refcounting
 
 Service-mode processes coordinate through a local registry at `${XDG_RUNTIME_DIR:-/tmp}/playwright-multiple/sessions.json`, keyed by `--session-key`. On startup a process takes an exclusive lock, reuses the keyed session if the service reports it still running (incrementing a refcount and recording its pid), or creates a new one otherwise. On shutdown (including SIGTERM/SIGINT) it decrements the refcount; the session is `DELETE`d only when the **last** process exits. Crashed processes that never decrement are reaped by the service's own idle timeout.
+
+The local registry is a **fast path only** — the browser-infra service is the source of truth for whether a browser already exists. Every create call carries `--share-key`, so even if the local registry is stale or missing (e.g. a fresh host, a wiped `/tmp`), the service dedupes on the share key and hands back the existing session rather than spawning a second browser. The service also refcounts (`shareCount`): a `DELETE` only tears the browser down when its share count reaches zero.
 
 ### `mcp.json` — service mode
 

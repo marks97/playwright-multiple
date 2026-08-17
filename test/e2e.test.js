@@ -62,9 +62,12 @@ test('live browser-infra session create/get/delete contract', async (t) => {
   const client = new ServiceClient({ baseUrl: SERVICE_URL, apiKey: SERVICE_KEY });
   const created = await client.createSession({ recordSession: false });
   assert.ok(created.id, 'session must have an id');
-  assert.match(created.connectUrl, /^ws:\/\/.+\/cdp\?token=.+/, 'connectUrl must be a CDP ws endpoint');
+  assert.equal(created.status, 'pending', 'create is async and returns pending');
+  assert.equal(created.connectUrl, null, 'pending session has no connectUrl yet');
+  const ready = await client.waitForRunning(created.id);
+  assert.match(ready.connectUrl, /^ws:\/\/.+\/cdp\?token=.+/, 'connectUrl must be a CDP ws endpoint');
   try {
-    assert.ok(await client.isAlive(created.id), 'new session should be running');
+    assert.ok(await client.isAlive(created.id), 'ready session should be running');
   } finally {
     const deleted = await client.deleteSession(created.id);
     assert.ok(deleted.ok, 'delete should return ok');

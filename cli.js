@@ -68,6 +68,7 @@ const hasCdpEndpoint = process.argv.includes('--cdp-endpoint');
 const serviceUrl = takeFlagValue('--service-url');
 const serviceKey = takeFlagValue('--service-key');
 const sessionKeyFlag = takeFlagValue('--session-key');
+const shareKeyFlag = takeFlagValue('--share-key');
 const contextIdFlag = takeFlagValue('--context-id');
 const ownerIdFlag = takeFlagValue('--owner-id');
 const persistFlag = takeBoolFlag('--persist');
@@ -502,6 +503,7 @@ async function main() {
       serviceUrl,
       serviceKey,
       sessionKey: sessionKeyFlag,
+      shareKey: shareKeyFlag,
       contextId: contextIdFlag,
       ownerId: ownerIdFlag,
       persist: persistFlag,
