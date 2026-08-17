@@ -2,6 +2,82 @@
 
 A Model Context Protocol (MCP) server that provides browser automation capabilities using [Playwright](https://playwright.dev). This server enables LLMs to interact with web pages through structured accessibility snapshots, bypassing the need for screenshots or visually-tuned models.
 
+---
+
+## playwright-multiple (this fork)
+
+`playwright-multiple` is a fork of `@playwright/mcp` that adds three things on top of the upstream server. The MCP server name stays `playwright` and every upstream tool name (`browser_click`, `browser_type`, …) is unchanged, so existing `mcp__playwright__*` references keep working.
+
+1. **Tab isolation for parallel agents.** Every tool accepts an extra `tabId`. Agents that pass distinct `tabId`s each get their own tab in one shared Chrome; the router keys tabs to the tab object (never an index) so one agent closing a tab never re-points another agent's `tabId`.
+2. **Self-managed browser sessions.** Instead of being handed a fixed CDP endpoint, the server can create and attach to a session on a [browser-infra](https://github.com/marks97/browser-infra) service by itself, and end it on shutdown. Multiple processes that share a `--session-key` share **one** session (see below).
+3. **Humanised input.** When enabled, clicks, typing, hovering, scrolling and dragging emit real pointer movement, per-keystroke timing and wheel events instead of teleport-clicks and `fill()`.
+
+### Modes
+
+- **Legacy CDP mode** — pass `--cdp-endpoint`. Behaviour is exactly as before: no session is created and humanised input defaults **off**. If both `--cdp-endpoint` and `--service-url` are given, `--cdp-endpoint` wins.
+- **Service mode** — pass `--service-url` (and `--service-key`) and omit `--cdp-endpoint`. On startup the server looks up or creates a browser-infra session and attaches to its `connectUrl`; humanised input defaults **on**.
+
+### Flags added by this fork
+
+| Flag | Description |
+|------|-------------|
+| `--service-url <url>` | browser-infra base URL. Enables service mode when `--cdp-endpoint` is absent. |
+| `--service-key <key>` | browser-infra project API key (sent as `Authorization: Bearer`; never logged). |
+| `--session-key <key>` | Sharing key. Processes with the same key share one session. Defaults to `--context-id`, else `default`. |
+| `--context-id <id>` | Attach a saved browser-infra context (Chrome profile). |
+| `--owner-id <id>` | Owner id, passed through for sticky egress. |
+| `--persist` | Persist the profile back to the context on session end. |
+| `--proxy <sticky\|residential\|none>` | Egress mode for the session (default `none`). |
+| `--solve-captchas` | Enable the browser-infra Capsolver detector for the session. |
+| `--humanize <on\|off>` | Force humanised input on/off. Default: on in service mode, off in `--cdp-endpoint` mode. |
+| `--humanize-seed <n>` | Seed the humaniser RNG for deterministic runs/tests. |
+
+Existing flags (`--cdp-endpoint`, `--cdp-timeout`, `--caps`, `--console-level`, `--idle-tab-timeout-min`, `--no-shared`, `--cdp-port`) are unchanged.
+
+### Session sharing and refcounting
+
+Service-mode processes coordinate through a local registry at `${XDG_RUNTIME_DIR:-/tmp}/playwright-multiple/sessions.json`, keyed by `--session-key`. On startup a process takes an exclusive lock, reuses the keyed session if the service reports it still running (incrementing a refcount and recording its pid), or creates a new one otherwise. On shutdown (including SIGTERM/SIGINT) it decrements the refcount; the session is `DELETE`d only when the **last** process exits. Crashed processes that never decrement are reaped by the service's own idle timeout.
+
+### `mcp.json` — service mode
+
+```json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "playwright-multiple",
+      "args": ["--service-url", "http://100.109.202.122:8090",
+               "--service-key", "bk_xxx",
+               "--session-key", "play4row-ig",
+               "--proxy", "residential",
+               "--caps", "vision",
+               "--console-level", "error"]
+    }
+  }
+}
+```
+
+### `mcp.json` — legacy CDP mode (unchanged)
+
+```json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "playwright-multiple",
+      "args": ["--cdp-endpoint", "http://127.0.0.1:9222",
+               "--cdp-timeout", "30000",
+               "--caps", "vision",
+               "--console-level", "error"]
+    }
+  }
+}
+```
+
+### Tests
+
+`npm test` runs the fork's `node:test` suite (registry concurrency + refcount, humanised-input statistics, pointer-path guarantees, backward compatibility, and an E2E). The live-service E2E leg runs only when `BROWSER_INFRA_URL` and `BROWSER_INFRA_KEY` are set, and is skipped otherwise.
+
+---
+
 ### Playwright MCP vs Playwright CLI
 
 This package provides MCP interface into Playwright. If you are using a **coding agent**, you might benefit from using the [CLI+SKILLS](https://github.com/microsoft/playwright-cli) instead.
