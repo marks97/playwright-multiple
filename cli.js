@@ -46,8 +46,6 @@ if (idleIdx !== -1 && process.argv[idleIdx + 1]) {
   process.argv.splice(idleIdx, 2);
 }
 
-// --service-* / --humanize flags are custom; strip them before Commander parses,
-// and keep --service-key out of argv so it can never reach a log line.
 function takeFlagValue(name) {
   const idx = process.argv.indexOf(name);
   if (idx !== -1 && process.argv[idx + 1] !== undefined && !process.argv[idx + 1].startsWith('--')) {
@@ -489,7 +487,7 @@ async function shutdown(code) {
     try {
       await sessionLifecycle.release();
     } catch {
-      // best effort; the service idle timeout is the backstop
+      void 0;
     }
   }
   process.exit(code);
