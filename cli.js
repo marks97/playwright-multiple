@@ -11,6 +11,10 @@
 
 const path = require('path');
 
+const { HumanInput } = require('./lib/human/humanInput');
+const { wrapHumanizedTools } = require('./lib/human/tools');
+const { SessionLifecycle } = require('./lib/session/lifecycle');
+
 // Resolve internal modules via absolute path (bypasses package.json exports)
 const pwCorePath = path.dirname(require.resolve('playwright-core/package.json'));
 const mcpServer = require(path.join(pwCorePath, 'lib/tools/utils/mcp/server.js'));
@@ -41,6 +45,46 @@ if (idleIdx !== -1 && process.argv[idleIdx + 1]) {
   if (!isNaN(mins) && mins > 0) idleTabTimeoutMs = Math.round(mins * 60 * 1000);
   process.argv.splice(idleIdx, 2);
 }
+
+// --service-* / --humanize flags are custom; strip them before Commander parses,
+// and keep --service-key out of argv so it can never reach a log line.
+function takeFlagValue(name) {
+  const idx = process.argv.indexOf(name);
+  if (idx !== -1 && process.argv[idx + 1] !== undefined && !process.argv[idx + 1].startsWith('--')) {
+    const value = process.argv[idx + 1];
+    process.argv.splice(idx, 2);
+    return value;
+  }
+  return undefined;
+}
+function takeBoolFlag(name) {
+  const idx = process.argv.indexOf(name);
+  if (idx !== -1) {
+    process.argv.splice(idx, 1);
+    return true;
+  }
+  return false;
+}
+
+const hasCdpEndpoint = process.argv.includes('--cdp-endpoint');
+const serviceUrl = takeFlagValue('--service-url');
+const serviceKey = takeFlagValue('--service-key');
+const sessionKeyFlag = takeFlagValue('--session-key');
+const contextIdFlag = takeFlagValue('--context-id');
+const ownerIdFlag = takeFlagValue('--owner-id');
+const persistFlag = takeBoolFlag('--persist');
+const proxyFlag = takeFlagValue('--proxy');
+const solveCaptchasFlag = takeBoolFlag('--solve-captchas');
+const humanizeFlag = takeFlagValue('--humanize');
+const humanizeSeedFlag = takeFlagValue('--humanize-seed');
+
+const serviceMode = !!serviceUrl && !hasCdpEndpoint;
+const humanizeEnabled = humanizeFlag !== undefined ? humanizeFlag !== 'off' : serviceMode;
+const humanSeed = humanizeSeedFlag !== undefined ? parseInt(humanizeSeedFlag, 10) : undefined;
+const human = humanizeEnabled ? new HumanInput({ seed: humanSeed }) : null;
+
+let serviceConnectUrl = null;
+let sessionLifecycle = null;
 
 // --- Tab ID Router ---
 class TabIdRouter {
@@ -207,6 +251,14 @@ async function waitForCdpReady(cdpEndpoint, { timeoutMs = 15000, intervalMs = 25
 
 async function getSharedBrowserContext(config) {
   const { chromium } = require('playwright-core');
+
+  if (serviceConnectUrl) {
+    const browser = await chromium.connectOverCDP(serviceConnectUrl);
+    process.stderr.write('[service] connected to remote browser session over CDP\n');
+    const contexts = browser.contexts();
+    return contexts.length > 0 ? contexts[0] : await browser.newContext();
+  }
+
   const cdpEndpoint = `http://localhost:${cdpPort}`;
 
   let browser;
@@ -308,6 +360,7 @@ Object.defineProperty(mcpServer, 'start', {
       const browserContext = await getSharedBrowserContext(buildSharedConfig());
       const caps = ['core', 'core-navigation', 'core-tabs', 'core-input'];
       const tools = filteredTools({ capabilities: caps });
+      if (human) wrapHumanizedTools(tools, human);
       if (backend) {
         // Drop the stale Context wrapper if any.
         await backend._context?.dispose().catch(() => {});
@@ -431,4 +484,35 @@ const packageJSON = require('./package.json');
 const p = program.version('Version ' + packageJSON.version).name('Playwright Multiple');
 decorateMCPCommand(p, packageJSON.version);
 
-void program.parseAsync(process.argv);
+async function shutdown(code) {
+  if (sessionLifecycle) {
+    try {
+      await sessionLifecycle.release();
+    } catch {
+      // best effort; the service idle timeout is the backstop
+    }
+  }
+  process.exit(code);
+}
+
+process.on('SIGTERM', () => { void shutdown(0); });
+process.on('SIGINT', () => { void shutdown(130); });
+
+async function main() {
+  if (serviceMode) {
+    sessionLifecycle = new SessionLifecycle({
+      serviceUrl,
+      serviceKey,
+      sessionKey: sessionKeyFlag,
+      contextId: contextIdFlag,
+      ownerId: ownerIdFlag,
+      persist: persistFlag,
+      proxy: proxyFlag,
+      solveCaptchas: solveCaptchasFlag,
+    });
+    serviceConnectUrl = await sessionLifecycle.acquire();
+  }
+  await program.parseAsync(process.argv);
+}
+
+void main();

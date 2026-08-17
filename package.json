@@ -1,6 +1,6 @@
 {
   "name": "playwright-multiple",
-  "version": "0.0.70",
+  "version": "0.1.0",
   "description": "Playwright MCP with tab isolation for parallel agents",
   "repository": {
     "type": "git",
@@ -13,6 +13,7 @@
   "license": "Apache-2.0",
   "scripts": {
     "build": "echo OK",
+    "test": "node --test test/*.test.js",
     "postinstall": "node postinstall.js"
   },
   "dependencies": {
