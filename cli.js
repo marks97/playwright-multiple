@@ -251,7 +251,8 @@ async function waitForCdpReady(cdpEndpoint, { timeoutMs = 15000, intervalMs = 25
 async function getSharedBrowserContext(config) {
   const { chromium } = require('playwright-core');
 
-  if (serviceConnectUrl) {
+  if (serviceMode) {
+    serviceConnectUrl = await sessionLifecycle.ready();
     const browser = await chromium.connectOverCDP(serviceConnectUrl);
     process.stderr.write('[service] connected to remote browser session over CDP\n');
     const contexts = browser.contexts();
@@ -510,7 +511,7 @@ async function main() {
       proxy: proxyFlag,
       solveCaptchas: solveCaptchasFlag,
     });
-    serviceConnectUrl = await sessionLifecycle.acquire();
+    await sessionLifecycle.acquire();
   }
   await program.parseAsync(process.argv);
 }

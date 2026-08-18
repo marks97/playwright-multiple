@@ -1,6 +1,6 @@
 {
   "name": "playwright-multiple",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Playwright MCP with tab isolation for parallel agents",
   "repository": {
     "type": "git",

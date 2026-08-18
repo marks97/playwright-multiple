@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 
 const { ServiceClient, isPrivateHost } = require('../lib/session/serviceClient');
-const { buildCreateBody, resolveShareKey } = require('../lib/session/lifecycle');
+const { buildCreateBody, resolveShareKey, SessionLifecycle } = require('../lib/session/lifecycle');
 
 function clientWithSessions(sequence) {
   let call = 0;
@@ -90,4 +90,56 @@ test('resolveConnectUrl falls back when only one url is present', () => {
   assert.equal(onNetwork.resolveConnectUrl({ publicConnectUrl: 'wss://x/cdp' }), 'wss://x/cdp');
   assert.equal(remote.resolveConnectUrl({ connectUrl: 'ws://y/cdp' }), 'ws://y/cdp');
   assert.equal(remote.resolveConnectUrl(null), null);
+});
+
+function lifecycleWithFakes() {
+  const calls = { create: 0, waitForRunning: 0 };
+  const client = {
+    createSession: async () => {
+      calls.create++;
+      return { id: 's1', status: 'pending', connectUrl: null, publicConnectUrl: null };
+    },
+    waitForRunning: async () => {
+      calls.waitForRunning++;
+      return { id: 's1', status: 'running', connectUrl: 'ws://172.20.0.9:8080/cdp?token=t' };
+    },
+    isAlive: async () => false,
+    resolveConnectUrl: (session) => (session && session.connectUrl) || null,
+    deleteSession: async () => ({ ok: true }),
+  };
+  const registry = {
+    acquire: async (key, createSession) => {
+      const created = await createSession();
+      return { sessionId: created.id, connectUrl: created.connectUrl, reused: false };
+    },
+    release: async () => ({ deleted: true }),
+  };
+  const lifecycle = new SessionLifecycle({ client, registry, sessionKey: 'k', log: () => {} });
+  return { lifecycle, calls };
+}
+
+test('acquire returns as soon as the session is created, without waiting for the browser', async () => {
+  const { lifecycle, calls } = lifecycleWithFakes();
+  const sessionId = await lifecycle.acquire();
+  assert.equal(sessionId, 's1');
+  assert.equal(calls.create, 1);
+  assert.equal(calls.waitForRunning, 0, 'startup must not block on the browser becoming ready');
+});
+
+test('ready resolves the connect url and is memoised across concurrent callers', async () => {
+  const { lifecycle, calls } = lifecycleWithFakes();
+  await lifecycle.acquire();
+  const [a, b] = await Promise.all([lifecycle.ready(), lifecycle.ready()]);
+  assert.equal(a, 'ws://172.20.0.9:8080/cdp?token=t');
+  assert.equal(b, a);
+  assert.equal(calls.waitForRunning, 1, 'concurrent ready() calls share one poll');
+  assert.equal(await lifecycle.ready(), a);
+  assert.equal(calls.waitForRunning, 1, 'a resolved connect url is cached');
+});
+
+test('ready acquires first when called before acquire', async () => {
+  const { lifecycle, calls } = lifecycleWithFakes();
+  const url = await lifecycle.ready();
+  assert.equal(url, 'ws://172.20.0.9:8080/cdp?token=t');
+  assert.equal(calls.create, 1);
 });
